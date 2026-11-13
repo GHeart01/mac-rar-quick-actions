@@ -55,6 +55,7 @@ fi
 
 # 2. helper script ---------------------------------------------------------------
 install -m 755 "$REPO_DIR/scripts/rartool.sh" "$APP_DIR/rartool.sh"
+install -m 644 "$REPO_DIR/scripts/progress.js" "$APP_DIR/progress.js"
 say "Installed helper to $APP_DIR"
 
 # 3. Quick Actions ---------------------------------------------------------------

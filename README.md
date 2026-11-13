@@ -42,11 +42,14 @@ SKIP_RAR=1 ./install.sh        # don't download rar; extract only, using `brew i
   - Nothing is overwritten: you get `Name 2`, `Name 3`, and so on instead.
 - **Multi-volume sets** (`Game.part1.rar`, `Game.part2.rar`, …) are extracted once, whichever volume or volumes you selected.
 - **Password-protected archives** bring up a password dialog, and you're asked again if the password is wrong.
-- **Large archives:** a spinning gear shows in the menu bar while it works, and a notification appears when it's done.
+- **Large archives:** a small progress window shows the overall percentage and the file being extracted. It has a **Cancel** button (or press Esc), and a notification appears when it's done.
 
 ### Compress
 
 - **Format:** RAR5 at normal compression. Symlinks are stored as links, and `.DS_Store` and `._*` files are left out.
+- **Progress:** the same progress window shows the percentage, with **Cancel**. Cancelling deletes the unfinished `.rar`.
+
+The progress window only appears for jobs that take longer than about a second. macOS also shows its own gear in the menu bar, which stays at "0% completed" because it can't see inside the script; the progress window is the one to watch.
 
 ### Errors and uninstalling
 
@@ -69,6 +72,7 @@ RARLAB's licence is saved next to the binaries as `license.txt`.
 workflows/Extract RAR.workflow      ┐  Automator Quick Actions (Finder Services).
 workflows/Compress to RAR.workflow  ┘  Each runs: rartool.sh extract|compress "$@"
 scripts/rartool.sh                     Does the work: calls rar/unrar, shows dialogs and notifications
+scripts/progress.js                    Progress window (JavaScript for Automation, no extra installs)
 tools/build_workflows.py               Regenerates the .workflow bundles
 install.sh / uninstall.sh
 ```

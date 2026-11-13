@@ -49,6 +49,67 @@ unique_path() { # dir, stem, ext (ext may be empty or ".rar")
   printf '%s' "$p"
 }
 
+# --------------------------------------------------------------- progress ---
+
+CANCELLED=130   # run_with_progress returns this when the user clicks Cancel
+
+# Run a rar/unrar command in the background and show a progress window with
+# its overall percentage (parsed from rar's console output) if it takes more
+# than about a second. Returns the command's exit status, or $CANCELLED.
+#
+#   run_with_progress "<window title>" cmd args...
+run_with_progress() {
+  local title=$1; shift
+  local work out st cancel pid ui="" ticks=0 pct name status tailtxt
+
+  work=$(mktemp -d "${TMPDIR:-/tmp}/rarqa-progress.XXXXXX") || { "$@" >>"$LOG" 2>&1; return $?; }
+  out="$work/out"; st="$work/status"; cancel="$work/cancel"
+  printf -- '-\tStarting…\n' >"$st"
+
+  "$@" >"$out" 2>&1 </dev/null &
+  pid=$!
+
+  while kill -0 "$pid" 2>/dev/null; do
+    sleep 0.25
+    ticks=$((ticks + 1))
+
+    # rar redraws "  5%" with backspaces; the last N% is the overall progress.
+    tailtxt=$(tail -c 8192 "$out" 2>/dev/null | LC_ALL=C tr '\b\r' '\n\n')
+    pct=$(printf '%s\n' "$tailtxt" | grep -aoE '[0-9]{1,3}%' | tail -1)
+    name=$(printf '%s\n' "$tailtxt" | grep -aE '^(Extracting|Adding|Updating) ' | tail -1 \
+           | sed -E 's/^[A-Za-z]+ +//; s/ {2,}.*$//')
+    [ -n "$name" ] && name="${title%% *} $(basename "$name")"   # "Extracting foo.bin"
+    pct=${pct%\%}
+    printf '%s\t%s\n' "${pct:--}" "${name:-$title}" >"$st.tmp" && mv -f "$st.tmp" "$st"
+
+    # Only pop up a window for jobs that aren't over almost instantly.
+    if [ -z "$ui" ] && [ $ticks -ge 4 ] && [ -f "$TOOL_DIR/progress.js" ]; then
+      osascript -l JavaScript "$TOOL_DIR/progress.js" "$title" "$st" "$cancel" >/dev/null 2>&1 &
+      ui=$!
+    fi
+
+    if [ -e "$cancel" ]; then
+      kill -TERM "$pid" 2>/dev/null
+      wait "$pid" 2>/dev/null
+      log "cancelled by user: $title"
+      echo done >"$st"; [ -n "$ui" ] && { kill "$ui" 2>/dev/null; wait "$ui" 2>/dev/null; }
+      rm -rf "$work"
+      return $CANCELLED
+    fi
+  done
+  wait "$pid"; status=$?
+
+  echo done >"$st"
+  # The window closes itself on "done"; make sure it's gone, quietly.
+  [ -n "$ui" ] && { sleep 0.3; kill "$ui" 2>/dev/null; wait "$ui" 2>/dev/null; }
+  # Keep messages (errors, warnings) in the log, minus the per-file progress noise.
+  LC_ALL=C tr '\b\r' '\n\n' <"$out" \
+    | grep -avE '^[[:space:]]*([0-9]{1,3}%)?[[:space:]]*(OK)?[[:space:]]*$|^(Extracting|Adding|Updating|Creating) ' \
+    >>"$LOG" 2>/dev/null
+  rm -rf "$work"
+  return $status
+}
+
 # ---------------------------------------------------------------- extract ---
 
 # For multi-volume sets ("x.part2.rar") return the first volume, so a set is
@@ -76,19 +137,22 @@ archive_stem() {
 
 # Run the extractor into an empty directory. Returns its exit status.
 run_extract() { # archive, destdir, password-or-empty
-  local archive=$1 dest=$2 pw=$3
+  local archive=$1 dest=$2 pw=$3 title
+  title="Extracting $(basename "$archive")"
+  # -idc hides the banner but keeps the percentage the progress window reads.
   if [ -x "$UNRAR" ]; then
     if [ -n "$pw" ]; then
-      "$UNRAR" x -y -o- -idq "-p$pw" -- "$archive" "$dest/" >>"$LOG" 2>&1
+      run_with_progress "$title" "$UNRAR" x -y -o- -idc "-p$pw" -- "$archive" "$dest/"
     else
-      "$UNRAR" x -y -o- -idq -p- -- "$archive" "$dest/" >>"$LOG" 2>&1
+      run_with_progress "$title" "$UNRAR" x -y -o- -idc -p- -- "$archive" "$dest/"
     fi
   elif command -v unar >/dev/null 2>&1; then
     # The Unarchiver's CLI (brew install unar) as a fallback extractor.
+    # It doesn't report a percentage, so the window shows a busy bar instead.
     if [ -n "$pw" ]; then
-      unar -q -f -D -o "$dest" -p "$pw" -- "$archive" >>"$LOG" 2>&1
+      run_with_progress "$title" unar -q -f -D -o "$dest" -p "$pw" -- "$archive"
     else
-      unar -q -f -D -o "$dest" -- "$archive" </dev/null >>"$LOG" 2>&1
+      run_with_progress "$title" unar -q -f -D -o "$dest" -- "$archive"
     fi
   else
     log "no extractor found ($UNRAR missing, unar not installed)"
@@ -148,6 +212,12 @@ extract_one() {
     break
   done
 
+  if [ $status -eq $CANCELLED ]; then
+    rm -rf "$tmp"
+    log "cancelled: $archive"
+    return $CANCELLED
+  fi
+
   # 0 = ok, 1 = non-fatal warning (e.g. a skipped file). Anything else failed.
   if [ $status -gt 1 ]; then
     rm -rf "$tmp"
@@ -177,7 +247,7 @@ extract_one() {
 }
 
 cmd_extract() {
-  local f first seen="" ok=0 fail=0 last=""
+  local f first seen="" ok=0 fail=0 cancelled=0 last="" rc
   for f in "$@"; do
     [ -f "$f" ] || continue
     case "$f" in *.[rR][aA][rR]) ;; *) continue ;; esac
@@ -185,14 +255,22 @@ cmd_extract() {
     # Skip volumes of a set that was already handled in this run.
     case "$seen" in *"|$first|"*) continue ;; esac
     seen="$seen|$first|"
-    if last=$(extract_one "$first"); then ok=$((ok + 1)); else fail=$((fail + 1)); fi
+    last=$(extract_one "$first"); rc=$?
+    if [ $rc -eq 0 ]; then ok=$((ok + 1))
+    elif [ $rc -eq $CANCELLED ]; then cancelled=$((cancelled + 1))
+    else fail=$((fail + 1)); fi
   done
+
+  if [ $cancelled -gt 0 ] && [ $ok -eq 0 ] && [ $fail -eq 0 ]; then
+    notify "Extract RAR" "Cancelled"
+    return 0
+  fi
 
   if [ $ok -eq 1 ] && [ $fail -eq 0 ]; then
     notify "Extract RAR" "Extracted to \"$(basename "$last")\""
   elif [ $ok -gt 1 ]; then
     notify "Extract RAR" "Extracted $ok archives$([ $fail -gt 0 ] && echo ", $fail failed")"
-  elif [ $ok -eq 0 ] && [ $fail -eq 0 ]; then
+  elif [ $ok -eq 0 ] && [ $fail -eq 0 ] && [ $cancelled -eq 0 ]; then
     notify "Extract RAR" "No .rar files were selected"
   fi
   [ $fail -eq 0 ]
@@ -235,17 +313,23 @@ cmd_compress() {
   fi
   out=$(unique_path "$dir" "$stem" ".rar")
 
-  notify "Compress to RAR" "Compressing to \"$(basename "$out")\"…"
   log "compress: ${names[*]} in $dir -> $out"
 
   # Relative names (we cd into the folder) so no absolute paths are stored.
   # -ma5 RAR5 format, -m3 normal compression, -r recurse, -ol keep symlinks,
-  # -x skip Finder metadata, -idq quiet, -y never prompt.
-  (cd "$dir" && "$RAR" a -ma5 -m3 -r -ol -idq -y \
+  # -x skip Finder metadata, -idc no banner (keeps the percentage), -y never prompt.
+  cd "$dir" || return 1
+  run_with_progress "Compressing $(basename "$out")" \
+    "$RAR" a -ma5 -m3 -r -ol -idc -y \
       -x'*.DS_Store' -x'*/.DS_Store' -x'._*' -x'*/._*' \
-      -- "$out" "${names[@]}") >>"$LOG" 2>&1
+      -- "$out" "${names[@]}"
   status=$?
 
+  if [ $status -eq $CANCELLED ]; then
+    rm -f "$out"
+    notify "Compress to RAR" "Cancelled"
+    return 0
+  fi
   if [ $status -gt 1 ]; then
     rm -f "$out"
     log "compress failed ($status): $out"
