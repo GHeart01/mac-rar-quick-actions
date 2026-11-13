@@ -51,62 +51,59 @@ unique_path() { # dir, stem, ext (ext may be empty or ".rar")
 
 # --------------------------------------------------------------- progress ---
 
-CANCELLED=130   # run_with_progress returns this when the user clicks Cancel
+# When run from the Quick Actions, RarQuickActions.action sets RQA_PROGRESS_FILE
+# and shows the number we write there (0-100) in the menu-bar gear.
+PROGRESS_FILE="${RQA_PROGRESS_FILE:-}"
+JOB_INDEX=0      # which archive of this run we're on (0-based)
+JOB_COUNT=1      # how many archives this run handles
 
-# Run a rar/unrar command in the background and show a progress window with
-# its overall percentage (parsed from rar's console output) if it takes more
-# than about a second. Returns the command's exit status, or $CANCELLED.
+set_progress() { # percent of the current job
+  [ -n "$PROGRESS_FILE" ] || return 0
+  echo $(( (JOB_INDEX * 100 + $1) / JOB_COUNT )) >"$PROGRESS_FILE" 2>/dev/null || true
+}
+
+# Cancelling: the gear's ✕ makes the action send SIGTERM. Stop rar and delete
+# whatever is half-written (temp extraction folder or partial .rar).
+CHILD_PID=""
+CLEANUP=""       # path to delete if we're cancelled
+WORK=""
+on_cancel() {
+  trap - TERM INT HUP
+  [ -n "$CHILD_PID" ] && { kill -TERM "$CHILD_PID" 2>/dev/null; wait "$CHILD_PID" 2>/dev/null; }
+  [ -n "$CLEANUP" ] && rm -rf "$CLEANUP"
+  [ -n "$WORK" ] && rm -rf "$WORK"
+  log "cancelled${CLEANUP:+, removed $CLEANUP}"
+  notify "RAR" "Cancelled"
+  exit 0
+}
+trap on_cancel TERM INT HUP
+[ -n "$PROGRESS_FILE" ] && trap 'rm -f "$PROGRESS_FILE"' EXIT
+
+# Run a rar/unrar command, passing its overall percentage (parsed from rar's
+# console output) to set_progress. Returns the command's exit status.
 #
-#   run_with_progress "<window title>" cmd args...
+#   run_with_progress cmd args...
 run_with_progress() {
-  local title=$1; shift
-  local work out st cancel pid ui="" ticks=0 pct name status tailtxt
+  local pct status
+  WORK=$(mktemp -d "${TMPDIR:-/tmp}/rarqa.XXXXXX") || return 1
 
-  work=$(mktemp -d "${TMPDIR:-/tmp}/rarqa-progress.XXXXXX") || { "$@" >>"$LOG" 2>&1; return $?; }
-  out="$work/out"; st="$work/status"; cancel="$work/cancel"
-  printf -- '-\tStarting…\n' >"$st"
+  "$@" >"$WORK/out" 2>&1 </dev/null &
+  CHILD_PID=$!
 
-  "$@" >"$out" 2>&1 </dev/null &
-  pid=$!
-
-  while kill -0 "$pid" 2>/dev/null; do
-    sleep 0.25
-    ticks=$((ticks + 1))
-
+  while kill -0 "$CHILD_PID" 2>/dev/null; do
+    sleep 0.3
     # rar redraws "  5%" with backspaces; the last N% is the overall progress.
-    tailtxt=$(tail -c 8192 "$out" 2>/dev/null | LC_ALL=C tr '\b\r' '\n\n')
-    pct=$(printf '%s\n' "$tailtxt" | grep -aoE '[0-9]{1,3}%' | tail -1)
-    name=$(printf '%s\n' "$tailtxt" | grep -aE '^(Extracting|Adding|Updating) ' | tail -1 \
-           | sed -E 's/^[A-Za-z]+ +//; s/ {2,}.*$//')
-    [ -n "$name" ] && name="${title%% *} $(basename "$name")"   # "Extracting foo.bin"
-    pct=${pct%\%}
-    printf '%s\t%s\n' "${pct:--}" "${name:-$title}" >"$st.tmp" && mv -f "$st.tmp" "$st"
-
-    # Only pop up a window for jobs that aren't over almost instantly.
-    if [ -z "$ui" ] && [ $ticks -ge 4 ] && [ -f "$TOOL_DIR/progress.js" ]; then
-      osascript -l JavaScript "$TOOL_DIR/progress.js" "$title" "$st" "$cancel" >/dev/null 2>&1 &
-      ui=$!
-    fi
-
-    if [ -e "$cancel" ]; then
-      kill -TERM "$pid" 2>/dev/null
-      wait "$pid" 2>/dev/null
-      log "cancelled by user: $title"
-      echo done >"$st"; [ -n "$ui" ] && { kill "$ui" 2>/dev/null; wait "$ui" 2>/dev/null; }
-      rm -rf "$work"
-      return $CANCELLED
-    fi
+    pct=$(tail -c 4096 "$WORK/out" 2>/dev/null | LC_ALL=C tr '\b\r' '\n\n' | grep -aoE '[0-9]{1,3}%' | tail -1)
+    [ -n "$pct" ] && set_progress "${pct%\%}"
   done
-  wait "$pid"; status=$?
+  wait "$CHILD_PID"; status=$?
+  CHILD_PID=""
 
-  echo done >"$st"
-  # The window closes itself on "done"; make sure it's gone, quietly.
-  [ -n "$ui" ] && { sleep 0.3; kill "$ui" 2>/dev/null; wait "$ui" 2>/dev/null; }
   # Keep messages (errors, warnings) in the log, minus the per-file progress noise.
-  LC_ALL=C tr '\b\r' '\n\n' <"$out" \
+  LC_ALL=C tr '\b\r' '\n\n' <"$WORK/out" \
     | grep -avE '^[[:space:]]*([0-9]{1,3}%)?[[:space:]]*(OK)?[[:space:]]*$|^(Extracting|Adding|Updating|Creating) ' \
     >>"$LOG" 2>/dev/null
-  rm -rf "$work"
+  rm -rf "$WORK"; WORK=""
   return $status
 }
 
@@ -137,22 +134,21 @@ archive_stem() {
 
 # Run the extractor into an empty directory. Returns its exit status.
 run_extract() { # archive, destdir, password-or-empty
-  local archive=$1 dest=$2 pw=$3 title
-  title="Extracting $(basename "$archive")"
-  # -idc hides the banner but keeps the percentage the progress window reads.
+  local archive=$1 dest=$2 pw=$3
+  # -idc hides the banner but keeps the percentage we read for the gear.
   if [ -x "$UNRAR" ]; then
     if [ -n "$pw" ]; then
-      run_with_progress "$title" "$UNRAR" x -y -o- -idc "-p$pw" -- "$archive" "$dest/"
+      run_with_progress "$UNRAR" x -y -o- -idc "-p$pw" -- "$archive" "$dest/"
     else
-      run_with_progress "$title" "$UNRAR" x -y -o- -idc -p- -- "$archive" "$dest/"
+      run_with_progress "$UNRAR" x -y -o- -idc -p- -- "$archive" "$dest/"
     fi
   elif command -v unar >/dev/null 2>&1; then
     # The Unarchiver's CLI (brew install unar) as a fallback extractor.
-    # It doesn't report a percentage, so the window shows a busy bar instead.
+    # It doesn't report a percentage, so the gear stays at 0% until it's done.
     if [ -n "$pw" ]; then
-      run_with_progress "$title" unar -q -f -D -o "$dest" -p "$pw" -- "$archive"
+      run_with_progress unar -q -f -D -o "$dest" -p "$pw" -- "$archive"
     else
-      run_with_progress "$title" unar -q -f -D -o "$dest" -- "$archive"
+      run_with_progress unar -q -f -D -o "$dest" -- "$archive"
     fi
   else
     log "no extractor found ($UNRAR missing, unar not installed)"
@@ -198,6 +194,7 @@ extract_one() {
   tmp=$(mktemp -d "$dir/.rarqa.XXXXXX") || { alert "Extract RAR" "Couldn't create a temporary folder in \"$dir\"."; return 1; }
   # mktemp makes it 0700; if it becomes the output folder, give it normal permissions.
   chmod "$(printf '%o' $(( 0777 & ~$(umask) )))" "$tmp"
+  CLEANUP="$tmp"   # removed if the user cancels
   log "extract: $archive -> $tmp"
 
   while :; do
@@ -206,21 +203,15 @@ extract_one() {
     # 11 = wrong password (RAR 5+), 3 = CRC error (older archives, wrong password)
     if [ -n "$pw" ] && { [ $status -eq 11 ] || [ $status -eq 3 ]; }; then
       rm -rf "$tmp"; mkdir -p "$tmp"
-      pw=$(ask_password "$name (wrong password, try again)") || { rm -rf "$tmp"; log "cancelled: $archive"; return 1; }
+      pw=$(ask_password "$name (wrong password, try again)") || { rm -rf "$tmp"; CLEANUP=""; log "cancelled: $archive"; return 1; }
       continue
     fi
     break
   done
 
-  if [ $status -eq $CANCELLED ]; then
-    rm -rf "$tmp"
-    log "cancelled: $archive"
-    return $CANCELLED
-  fi
-
   # 0 = ok, 1 = non-fatal warning (e.g. a skipped file). Anything else failed.
   if [ $status -gt 1 ]; then
-    rm -rf "$tmp"
+    rm -rf "$tmp"; CLEANUP=""
     log "extract failed ($status): $archive"
     alert "Extract RAR" "Couldn't extract \"$name\" (error $status). See ~/Library/Logs/RarQuickActions.log for details."
     return 1
@@ -242,35 +233,38 @@ extract_one() {
     target=$(unique_path "$dir" "$stem" "")
     mv "$tmp" "$target"
   fi
+  CLEANUP=""
   log "extracted: $archive -> $target (status $status)"
-  printf '%s\n' "$target"
+  LAST_TARGET=$target
 }
 
+LAST_TARGET=""
+
 cmd_extract() {
-  local f first seen="" ok=0 fail=0 cancelled=0 last="" rc
+  local f first seen="" ok=0 fail=0 archives=() a
   for f in "$@"; do
     [ -f "$f" ] || continue
     case "$f" in *.[rR][aA][rR]) ;; *) continue ;; esac
     first=$(first_volume "$f")
-    # Skip volumes of a set that was already handled in this run.
+    # Skip volumes of a set that's already queued.
     case "$seen" in *"|$first|"*) continue ;; esac
     seen="$seen|$first|"
-    last=$(extract_one "$first"); rc=$?
-    if [ $rc -eq 0 ]; then ok=$((ok + 1))
-    elif [ $rc -eq $CANCELLED ]; then cancelled=$((cancelled + 1))
-    else fail=$((fail + 1)); fi
+    archives+=("$first")
   done
 
-  if [ $cancelled -gt 0 ] && [ $ok -eq 0 ] && [ $fail -eq 0 ]; then
-    notify "Extract RAR" "Cancelled"
-    return 0
-  fi
+  # Not in a $(subshell), so the cancel trap can reach rar and clean up.
+  JOB_COUNT=${#archives[@]}; [ "$JOB_COUNT" -gt 0 ] || JOB_COUNT=1
+  JOB_INDEX=0
+  for a in ${archives[@]+"${archives[@]}"}; do
+    if extract_one "$a"; then ok=$((ok + 1)); else fail=$((fail + 1)); fi
+    JOB_INDEX=$((JOB_INDEX + 1))
+  done
 
   if [ $ok -eq 1 ] && [ $fail -eq 0 ]; then
-    notify "Extract RAR" "Extracted to \"$(basename "$last")\""
+    notify "Extract RAR" "Extracted to \"$(basename "$LAST_TARGET")\""
   elif [ $ok -gt 1 ]; then
     notify "Extract RAR" "Extracted $ok archives$([ $fail -gt 0 ] && echo ", $fail failed")"
-  elif [ $ok -eq 0 ] && [ $fail -eq 0 ] && [ $cancelled -eq 0 ]; then
+  elif [ $ok -eq 0 ] && [ $fail -eq 0 ]; then
     notify "Extract RAR" "No .rar files were selected"
   fi
   [ $fail -eq 0 ]
@@ -319,17 +313,14 @@ cmd_compress() {
   # -ma5 RAR5 format, -m3 normal compression, -r recurse, -ol keep symlinks,
   # -x skip Finder metadata, -idc no banner (keeps the percentage), -y never prompt.
   cd "$dir" || return 1
-  run_with_progress "Compressing $(basename "$out")" \
+  CLEANUP="$out"   # removed if the user cancels
+  run_with_progress \
     "$RAR" a -ma5 -m3 -r -ol -idc -y \
       -x'*.DS_Store' -x'*/.DS_Store' -x'._*' -x'*/._*' \
       -- "$out" "${names[@]}"
   status=$?
+  CLEANUP=""
 
-  if [ $status -eq $CANCELLED ]; then
-    rm -f "$out"
-    notify "Compress to RAR" "Cancelled"
-    return 0
-  fi
   if [ $status -gt 1 ]; then
     rm -f "$out"
     log "compress failed ($status): $out"

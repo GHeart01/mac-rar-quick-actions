@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleExecutable</key>
+	<string>RarQuickActions</string>
+	<key>CFBundleIdentifier</key>
+	<string>io.github.gheart01.RarQuickActions</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>RAR</string>
+	<key>CFBundlePackageType</key>
+	<string>BNDL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1.0</string>
+	<key>NSPrincipalClass</key>
+	<string>RarQuickAction</string>
+	<key>AMName</key>
+	<string>RAR</string>
+	<key>AMAccepts</key>
+	<dict>
+		<key>Container</key>
+		<string>List</string>
+		<key>Optional</key>
+		<true/>
+		<key>Types</key>
+		<array>
+			<string>com.apple.cocoa.path</string>
+		</array>
+	</dict>
+	<key>AMProvides</key>
+	<dict>
+		<key>Container</key>
+		<string>List</string>
+		<key>Types</key>
+		<array>
+			<string>com.apple.cocoa.path</string>
+		</array>
+	</dict>
+	<key>AMApplication</key>
+	<array>
+		<string>Finder</string>
+	</array>
+	<key>AMCategory</key>
+	<array>
+		<string>AMCategoryFilesAndFolders</string>
+	</array>
+	<key>AMDefaultParameters</key>
+	<dict>
+		<key>mode</key>
+		<string>extract</string>
+	</dict>
+	<key>AMIconName</key>
+	<string>Finder</string>
+	<key>AMDescription</key>
+	<dict>
+		<key>AMDSummary</key>
+		<string>Extracts or creates RAR archives, reporting progress to the menu bar.</string>
+	</dict>
+</dict>
+</plist>
