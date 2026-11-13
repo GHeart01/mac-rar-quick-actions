@@ -41,10 +41,17 @@ trap 'rmdir "$LOCK" 2>/dev/null; [ -n "$WORK" ] && rm -rf "$WORK"' EXIT
 
 current=$(cat "$APP_DIR/VERSION" 2>/dev/null || echo 0)
 
-# github.com/<repo>/releases/latest redirects to .../releases/tag/<tag>.
-location=$(curl -fsSI --proto '=https' --max-time 20 "https://github.com/$REPO/releases/latest" 2>/dev/null \
-           | tr -d '\r' | awk 'tolower($1) == "location:" { print $2 }' | tail -1)
-tag=${location##*/releases/tag/}
+# Ask the GitHub API for the latest release's tag. If that fails (e.g. rate
+# limited), fall back to github.com/<repo>/releases/latest, which redirects to
+# .../releases/tag/<tag> (that redirect can lag behind a new release).
+tag=$(curl -fsS --proto '=https' --max-time 20 -H 'Accept: application/vnd.github+json' \
+        "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null \
+      | sed -nE 's/^[[:space:]]*"tag_name":[[:space:]]*"([^"]+)".*/\1/p' | head -1)
+if [ -z "$tag" ]; then
+  location=$(curl -fsSI --proto '=https' --max-time 20 "https://github.com/$REPO/releases/latest" 2>/dev/null \
+             | tr -d '\r' | awk 'tolower($1) == "location:" { print $2 }' | tail -1)
+  tag=${location##*/releases/tag/}
+fi
 if ! [[ "$tag" =~ ^v[0-9]+(\.[0-9]+)*$ ]]; then
   log "couldn't find the latest release (offline?)"
   exit 0

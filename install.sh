@@ -26,7 +26,7 @@ AGENT_PLIST="$HOME/Library/LaunchAgents/$AGENT_LABEL.plist"
 UPDATER="${RQA_UPDATER:-0}"   # 1 when run by update.sh
 VERSION="$(tr -d '[:space:]' <"$REPO_DIR/VERSION")"
 
-say() { printf '\033[1m==>\033[0m %s\n' "$*"; }
+say() { if [ -t 1 ]; then printf '\033[1m==>\033[0m %s\n' "$*"; else printf '==> %s\n' "$*"; fi; }
 
 mkdir -p "$APP_DIR/bin" "$SERVICES_DIR"
 
